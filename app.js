@@ -4,6 +4,8 @@ var Botkit = require('botkit');
 var sprintf = require("sprintf-js").sprintf
 var url = require('url');
 
+var googleTranslate = require('google-translate')(process.env.translateKey || '');
+
 var prompts = require('./prompts');
 var api = require('./api');
 var search = require('./search');
@@ -11,19 +13,50 @@ var search = require('./search');
 var formatter = require('./formatter');
 var texting = require('./texting');
 var logging = require('./logging');
+var helper = require('./helper');
+var userdata = require('./userdata');
+var luisApi = require('./luis');
 
 // Create bot and add dialogs
-var DEBUG = false;
+var DEBUG = process.env.debug === 'true' || false;
 
+var NOTEXTBOT = true;
 
-function sende(session, text, intent){
+function sende(session, text, intent, force){
     if (typeof text === 'string'){
         text = [text];
     }
-    var msg = new builder.Message();
-    msg.setLanguage(session.message.sourceLanguage || session.message.language);
-    msg.setText(session, text);
-    session.send(msg);
+    text = text || 'Ich bin sprachlos.';
+    
+    if (userdata.getFlag(session, 'offended') && force !== true){
+        text = '...';
+    }
+    
+    if (typeof session.flagFake === 'undefined'){
+        var msg = new builder.Message();
+        msg.setLanguage(session.message.sourceLanguage || session.message.language);
+        msg.setText(session, text);
+        if (session.tempAttachments && session.tempAttachments.length){
+            session.tempAttachments.forEach(function(attachment){
+                msg.addAttachment(attachment);
+            });
+            session.tempAttachments = [];
+        }        
+        
+        session.send(msg);
+     } else {
+         //TODO Define reply object
+         //TODO choose text from text array randomly
+         var reply = {};
+         reply.text = text[Math.floor(Math.random()*text.length)];
+         
+         if (session.tempAttachments){
+             reply.attachments = session.tempAttachments;
+         }
+         
+         console.log('SENDE>', reply);
+         session.send(reply);
+     }
     
   logging.conversation({
 	"message_text": session.message.text,
@@ -31,20 +64,20 @@ function sende(session, text, intent){
 	"message_language": session.message.language,
 	"message_sourcelanguage": session.message.sourceLanguage,
 	"reply_intent": intent,  
-	"reply_language": msg.language,
-	"reply_text": msg.text,
+	"reply_language": msg ? msg.language : 'de',
+	"reply_text": msg ? msg.text : reply.text,
 	"channel": session.message.from ? session.message.from.channelId : 'No message.from',
 	"debug": "sendFunction"
   });
-    
-    // session.send({
-    //     "language": session.message.sourceLanguage || session.message.language,
-    //     "text": text
-    // });
+}
+
+function attach(session, data){
+    if (typeof session.tempAttachments === 'undefined') {session.tempAttachments = [];}
+    session.tempAttachments.push(data);
 }
 
 
-if (process.env.PORT || process.env.port || DEBUG){
+if (NOTEXTBOT && (process.env.PORT || process.env.port || DEBUG)){
     var bot = new builder.BotConnectorBot({ appId: process.env.appId, appSecret: process.env.appSecret });
     bot.configure({
         userWelcomeMessage: "userWelcomeMessage",
@@ -56,34 +89,28 @@ if (process.env.PORT || process.env.port || DEBUG){
 
 var dialog = new builder.LuisDialog('https://api.projectoxford.ai/luis/v1/application?id=3a505278-4c2c-4d3b-bdb5-43c4de6cc83e&subscription-key=' + process.env.luisKey);
 
-// bot.news.recent
-// bot.news.hot clicks
+/**
+ * Extend default dialog to be reusable
+ */
+var xdialog = {
+    _data: {},
+    on: function(name, callback){
+        dialog.on(name, callback);
+        xdialog._data[name] = callback;
+    },
+    trigger: function(name, session, args){
+        if (typeof xdialog._data[name] === 'function'){
+            xdialog._data[name](session, args);
+        } else {
+            console.log('WARNING: Intent ' + name + ' not found in xdialog.');
+        }
+    }
+}
 
-// dialog.on('bot.feed.recent', function (session, args) {
-//         api.readFeed('wiwo', 'recent').then(function(data){
-//             //remember last articles
-//             if (data.length){
-//                 var lastLinks = [];
-//                 data.forEach(function(item){
-//                     lastLinks.push({title: item.title, link: item.link});
-//                 });
-//                 session.userData.lastLinks = lastLinks;
-//             }
-//             sende(session, formatter.toLinkList(data, 'Hier sind die fünf neusten Artikel'));
-//         });
-// });
 
-// dialog.on('bot.feed.hot', function (session, args) {
-//         api.readFeed('wiwo', 'hot').then(function(data){
-//             //console.log('Got', data);
-//             sende(session, formatter.toLinkList(data, 'Hier sind die fünf am meisten lesenen Artikel'));
-//         });
-// });
-
-// dialog.on('bot.static.hi', function (session, args) {
-//         sende(session, texting.static('hello'));
-// });
-
+/**
+ * Register intents
+ */
 texting.onReady(function(intents){
     
     /** Defaults */
@@ -101,69 +128,195 @@ texting.onReady(function(intents){
           /** Static intents */
           case 'static':
             console.log('OK> ' + aIntent);
-            dialog.on('bot.static.' + aIntent[1], function (session, args) {
-                sende(session, texting.static(aIntent[1]), 'bot.static.' + aIntent[1]);
+            xdialog.on('bot.static.' + aIntent[1], function (session, args) {
+                var force = false;
+                switch (aIntent[1]) {
+                    case 'offend':
+                        userdata.setFlag(session, 'offended', true);
+                        force = true; //let message through
+                        break;
+                    case 'excuse':
+                        userdata.setFlag(session, 'offended', false);
+                        break;
+                    default:
+                        break;
+                }
+                sende(session, texting.static(aIntent[1]), 'bot.static.' + aIntent[1], force);
             });          
             break;
            
           /** Feeds  */
           case 'feed':
             console.log('OK> ' + aIntent);
-            dialog.on('bot.feed.' + aIntent[1], function (session, args) {
+            xdialog.on('bot.feed.' + aIntent[1], function (session, args) {
                 api.readFeed('wiwo', aIntent[1]).then(function(data){
-                    //remember last articles
-                    if (data.length){
-                        var lastLinks = [];
-                        data.forEach(function(item){
-                            lastLinks.push({title: item.title, link: item.link});
+                    userdata.rememberLastArticles(session, data);
+                    
+                    //cards attachment feature test
+                    data.forEach(function(row, index){
+                        attach(session, {
+                            title: row.overline.trim() + ': ' + row.title,
+                            titleLink: row.link,
+                            text: row.summary,
+                            thumbnailUrl: row.imageUrl,
+                            fallbackText: (index+1) + '. ' + row.overline.trim() + ': ' + row.title + ' - [Artikel öffnen](' + row.link + ')' + ' *(' + row.ago + ')*'
                         });
-                        session.userData.lastLinks = lastLinks;
-                    }
+                    });
+                    
                     sende(session,
                           formatter.toLinkList(data, texting.get(intent)),
                           'bot.feed.' + aIntent[1]);
                 });
             });
             break;
-
+            
+          //doesn't care about type - just confirms that intent was recognized
+          case 'temp':
+            console.log('OK> ' + aIntent);
+            xdialog.on('bot.temp.' + aIntent[1], function (session, args) {
+                sende(session, texting.get(intent), 'bot.' + 'bot.temp.' + aIntent[1]);
+            });  
+          
+          case 'dynamic':
+            console.log('OK> ' + aIntent);
+            xdialog.on('bot.dynamic.' + aIntent[1], function (session, args) {
+                sende(session, texting.dynamic(aIntent[1]), 'bot.' + intent);
+            });  
+            
           default:
-            console.warn('SYS> Not action for intent: ' + intent[0] + ' available');  
+            console.warn('SYS> Not action for intent: ' + aIntent[0] + ' available');  
        }
     });
-    
-    
      
 });
 
 
 
-dialog.on('bot.search', 
+xdialog.on('bot.search', 
     function (session, args) {
         var searchTerm = builder.EntityRecognizer.findEntity(args.entities, 'Search Term');
         console.log('Search Term', searchTerm);
         if (!searchTerm) {
-           sende(session,
-                 "Es tut mir leid. Dies habe ich nicht verstanden: " + session.message.text,
-                 'bot.search-NoSearchTerm');
+            sende(session,
+                texting.get('search__nosearchterm', session.message.text),
+                'bot.search__nosearchterm');
         } else {
            search.doSearch(searchTerm.entity).then(function(data){
                console.log('search_result', data);
-               if (data.length){
+               if (data.length){                    
                     sende(session, formatter.toSearchResultsList(data, searchTerm.entity),'bot.search');
                } else {
-                    sende(session,
-                    sprintf("Suche nach '%s' hat leider nichts erbracht... Sorry.", searchTerm.entity),
-                    'bot.search');
+                    sende(session, texting.get('search__noresult', searchTerm.entity),
+                    'bot.search__noresult');
                }
            }).catch(function(err){
                sende(session,
-                     sprintf("Fehler bei der Suche nach '%s'. ärgerlich...", searchTerm.entity),
-                     'bot.search');
+                    texting.get('search__error', searchTerm.entity),
+                    'bot.search__error');
            })
            
         }
     }
 );
+
+/**
+ * SEARCH FOR STOCK 
+ */
+xdialog.on('bot.stock', function (session, args) {
+    var searchTerm = builder.EntityRecognizer.findEntity(args.entities, 'Search Term');
+    
+    if (!searchTerm){
+        var stagedSearchTerm = helper.getQuoted(session.message.text);
+        if (stagedSearchTerm){
+            searchTerm = {
+                entity: stagedSearchTerm
+            };
+        }
+    }
+     
+    if (!searchTerm) {
+        sende(session, texting.get('stock__nosearchterm'), 'bot.stock__nosearchterm');
+    } else {
+        api.getStock(searchTerm.entity).then(function(data){
+            //success:
+            var id = data.hrefMobile.split('=')[1];
+            attach(session, {
+               contentType: 'image/png',
+               contentUrl: sprintf('http://boerse.wiwo.de/3048/chartNG.gfn?chartType=0&instrumentId=%s&width=580&height=243&subProperty=20&highLow=1', id)   
+            });
+            sende(session, texting.get('stock__found',
+                data.descriptionShort,
+                data.lastPrice.replace('&euro;','€'),
+                data.quoteTime,
+                id
+                ), 'bot.stock__nosearchterm');              
+        }).catch(function(err){
+            //error:
+            sende(session, texting.get('stock__error', err.description), 'bot.stock__error');            
+        });        
+    }
+
+});
+
+xdialog.on('bot.special.feed.author.recent', 
+    function (session, args) {
+        var author = builder.EntityRecognizer.findEntity(args.entities, 'Author');
+        //console.log('Author', author);
+        if (!author) {
+            sende(session, texting.get('special.feed.author.recent__noauthor', session.message.text),
+                 'bot.special.feed.author.recent__noauthor');
+        } else {
+            sende(session, texting.get('special.feed.author.recent', author.entity), 'bot.special.feed.author.recent');
+            //TODO: Add query for author RSS feed
+        }
+    }
+);
+
+xdialog.on('bot.ressort.recent', 
+    function (session, args) {
+        var ressort = builder.EntityRecognizer.findEntity(args.entities, 'Ressorts');
+        console.log('Ressort', ressort);
+        
+        var keywords = {
+            'cooperation': 'unternehmen',
+            'corporate': 'unternehmen',
+            'technology': 'technologie',
+            'politics': 'politik',
+            'politic': 'politik',
+            'policy': 'politik',
+            'success': 'erfolg',
+            'finance': 'finanzen',
+            'financial': 'finanzen'
+        };
+        var found = false;
+        var ressortFound = '';
+        
+        for (var x in keywords){
+            if (!found && session.message.text.indexOf(x) > -1){
+                ressortFound = keywords[x];
+                found = true;
+            }
+        }
+        
+        if (!found) {
+            sende(session,
+                texting.get('ressort.recent__noressort', session.message.text),
+                'bot.ressort.recent__noressort');
+        } else {
+            //console.log('Ressort>' + ressortFound);
+            api.readFeed('wiwo', ressortFound).then(function(data){
+                userdata.rememberLastArticles(session, data);
+                sende(session,
+                        formatter.toLinkList(data, texting.get('ressort.recent', ressortFound.charAt(0).toUpperCase() + ressortFound.slice(1))),
+                        'bot.feed.' + ressortFound);
+            });
+            
+            //TODO: Add query for author RSS feed
+        }
+
+    }
+);
+
  
 dialog.onBegin(function (session, args, next) {
     sende(session, 'Hallo Welt!','onBegin');
@@ -171,12 +324,24 @@ dialog.onBegin(function (session, args, next) {
 
 dialog.onDefault(function(session, args){
     sende(session,
-          "Es tut mir leid. Dies habe ich nicht verstanden: " + session.message.text,
-          'onDefault');   
+        sprintf("Es tut mir leid. Dies habe ich nicht verstanden.  \nÜbersetzung: '%s'.  \nBeste Vermutung: %s (%s%%)",
+           session.message.text,
+           helper.getIntent(args),
+           helper.getConfidence(args)
+        ),
+        'onDefault');   
 });
 
 
 bot.add('/', dialog);
+
+
+// bot.use(function (session, next){
+//    if (typeof session.userData.flags === 'undefined'){
+//        session.send('...');
+//    }
+    
+// });
 
 // Install logging middleware
 bot.use(function (session, next) {
@@ -200,16 +365,17 @@ bot.use(function (session, next) {
 });
 
 var events = ['error',
-'reply',
-'send',
-'quit',
-'Message',
-'DeleteUserData',
-'BotAddedToConversation',
-'BotRemovedFromConversation',
-'UserAddedToConversation',
-'UserRemovedFromConversation',
-'EndOfConversation'];
+    'reply',
+    'send',
+    'quit',
+    'Message',
+    'DeleteUserData',
+    'BotAddedToConversation',
+    'BotRemovedFromConversation',
+    'UserAddedToConversation',
+    'UserRemovedFromConversation',
+    'EndOfConversation'
+];
 
 events.forEach(function(name){
     bot.on(name,function(messageEvent){
@@ -257,7 +423,7 @@ commands.onDefault(function(session, args){
 
 
 // Setup Restify Server
-if (process.env.PORT || process.env.port || DEBUG){
+if (NOTEXTBOT && (process.env.PORT || process.env.port || DEBUG)){
 
 
 
@@ -296,28 +462,73 @@ if (process.env.PORT || process.env.port || DEBUG){
 
     
     //External API
-    server.get('/ext', function(req, res, next) {
-        var query = url.parse(req.url,true).query;
-        console.log('params', query)
+    if (process.env.translateKey){
+        server.get('/ext', function(req, res, next) {
+            var query = url.parse(req.url,true).query;
+            //console.log('params', query)
+            res.header("Content-Type", "application/json");
+            res.charSet('utf-8');
+            res.header('Access-Control-Allow-Origin', '*');
+            res.header('Access-Control-Allow-Methods', 'GET');            
+
             if (query.msg){
-            var msg = "A message for you:" + query.msg;
-            console.log("slackBot", bot);
-            //builder.DialogAction.send(msg);
-            //bot.send(msg);
-            //slackBot.bot.say(msg);
-            //bot.beginDialog(address: IBeginDialogAddress, dialogId: string, dialogArgs?: any): void
-            //bot.beginDialog({ from: alarm.from, to: alarm.to }, '/notify', msg);
-            res.send("A message for you:" + msg);
-        } else {
-            res.send('No msg...');
+                var msg = query.msg;
+
+                googleTranslate.translate(msg, 'de','en', function(err, translation) {
+                    if (err){
+                        res.send(err);
+                    } else {
+                        console.log(translation);
+                        //res.send("Translation: " + translation.translatedText);
+                        
+                        var message = {
+                              text: translation.translatedText,
+                              sourceText: msg,
+                              language: 'en',
+                              sourceLanguage: 'de'  
+                        };
+                        
+                        res.message = message;
+                        res.userData = {};
+                        res.flagFake = true;
+                        
+                        
+                        //sende(res, translation.translatedText, '');
+                        
+                        luisApi.query(translation.translatedText).then(
+                            function(json){
+                                var args = JSON.parse(json);
+                                if (helper.getConfidence(args) > 9){
+                                    xdialog.trigger(helper.getIntent(args), res, args);    
+                                }
+                                
+                            }
+                        )
+                        
+                        //todo Args = LUIS Object
+                    }
+                // =>  { translatedText: 'Hallo', originalText: 'Hello', detectedSourceLanguage: 'en' }
+                });
+
+
+                
+            } else {
+                res.send('No msg...');
+            }
+            next();
+        });
+    } else {
+        console.log('ERR> Problem detected.');
+        if (typeof process.env.translateKey === 'undefined'){
+            console.log('ERR> translateKey Env Var missing');
         }
-        next();
-    });
+    }
 
     server.listen(process.env.PORT || process.env.port || 3978, function () {
         console.log('%s listening to %s', server.name, server.url); 
     });
 
 } else {
+    console.log('START:');
     bot.listenStdin();
 }

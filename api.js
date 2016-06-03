@@ -1,6 +1,7 @@
 var FeedParser = require('feedparser');
 var http = require("http");
 var moment = require('moment');
+var request = require('request');
 moment.locale('de');
 var Q = require('q');
 
@@ -9,6 +10,11 @@ var CONST = {
   RSS: 'http://www.wiwo.de/contentexport/feed/rss/',
   DOMAIN: {
     wiwo: 'www.wiwo.de' 
+  },
+  STOCK: {
+    SEARCH: 'http://finanzen.handelsblatt.com/include_chart.htn?sektion=instrumentId&suchbegriff=',
+    JSON: 'http://finanzen.handelsblatt.com/kurse_einzelkurs_uebersicht.htn?view=jsonChart&debug=1&i=',
+    IMG: 'http://boerse.wiwo.de/3048/chartNG.gfn?chartType=0&width=580&height=243&subProperty=20&highLow=1&instrumentId=120517'
   }
 };
 
@@ -21,8 +27,8 @@ var FEEDS = {
     finanzen: CONST.RSS + 'finanzen',
     politik: CONST.RSS + 'politk',
     erfolg: CONST.RSS + 'erfolg',
-    techonolgie: CONST.RSS + 'technologie',
-    green:'http://green.wiwo.de/feed/'
+    technologie: CONST.RSS + 'technologie'//,
+    //green:'http://green.wiwo.de/feed/'
   }
 };
 
@@ -35,7 +41,7 @@ function parseItem(item) {
     id: item.link.split('/').pop().split('.')[0],
     date: new Date(item.date),
     title: item.title,
-    //summary: item.summary,
+    summary: item.summary,
     //html: item.description,
     link: item.link + '?share=bot',
     categories: item.categories
@@ -131,15 +137,58 @@ api.readFeed = function (source, id) {
 }
 
 
-if (require.main === module) {
-  var feed;
-  for (var x in FEEDS.wiwo){
-    feed = FEEDS.wiwo[x];
-    console.log('FEED ', x, feed)
-    api.readFeed('wiwo', 'recent').then(function(data){
-      console.log('Got', data);
+
+//STOCK READER
+api.getStock = function(searchTerm){
+  var deferred = Q.defer();
+  
+  request.get(CONST.STOCK.SEARCH + encodeURIComponent(searchTerm), function (error, response, body) {
+      if (!error && response.statusCode == 200) {
+        //console.log(body) // Show the HTML for the Google homepage.
+        var aBody = body.split('=');
+        if (aBody.length === 2){
+          
+          //TODO Get JSON with details for stock
+          request.get(CONST.STOCK.JSON + aBody[0], function (error, response, body) {
+            if (!error && response.statusCode == 200) {
+              deferred.resolve(JSON.parse(body)[aBody[0]]);    
+            } else {
+              deferred.reject({description:'Stock JSON data not found'});
+            }  
+          })
+          
+          
+        } else {
+          deferred.reject({description:'Stock ID not found: "' + searchTerm + '"'});
+        }
+ 
+      } else {
+        console.log('ERROR', error, response);    
+        deferred.reject(error);
+      }
     });
-  }
+  
+  return deferred.promise;  
+}
+
+if (require.main === module) {
+  // var feed;
+  // for (var x in FEEDS.wiwo){
+  //   feed = FEEDS.wiwo[x];
+  //   console.log('FEED ', x, feed)
+  //   api.readFeed('wiwo', 'recent').then(function(data){
+  //     console.log('Got', data);
+  //   });
+  // }
+  api.getStock('apple').then(function(data){
+    console.log('getStock success: ', data);
+  });
+  api.getStock('sdfsdfsdf').then(function(data){
+    console.log('getStock success: ', data);
+  }).catch(function(err){
+    console.error('getStock failed: ', err);
+  });
+  
 } else {
     module.exports = api;
 }

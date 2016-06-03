@@ -10,12 +10,12 @@ logging.conversation = function(payload){
 		method: 'POST',
 		json: payload
 	};
-	console.log('Sending data...');
+	//console.log('Sending data...');
 	request(options, function (error, response, body) {
 		if (!error && response.statusCode == 200) {
-			console.log(body) // Print the shortened url.
+			//console.log(body) // Print the shortened url.
 		} else {
-			console.warn('Error', error, response.statusCode);
+			//console.warn('Error', error, response.statusCode);
 			
 		}
 	});

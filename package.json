@@ -5,7 +5,7 @@
   "main": "app.js",
   "engines": {
     "node": "5.9.1"
-  },  
+  },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node app.js"
@@ -13,9 +13,10 @@
   "author": "Federico Elles <federicoplus@gmail.com>",
   "license": "ISC",
   "dependencies": {
-    "botbuilder": "^0.9.1",
+    "botbuilder": "^1.0.1",
     "botkit": "0.0.15",
     "feedparser": "^1.1.4",
+    "google-translate": "^1.0.6",
     "moment": "^2.12.0",
     "node-bing-api": "^2.4.0",
     "node-readability": "^2.2.0",
