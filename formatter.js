@@ -42,7 +42,7 @@ formatter.toSearchResultsList = function(data, searchTerm){
         addLine('');
 	});
     addLine('');
-	addLine('*- Suchergebnisse von [Bing](http://www.bing.de?q='+encodeURIComponent(searchTerm+' site:wiwo.de')+')*');
+	addLine('Suchergebnisse von [Bing](http://www.bing.de?q='+encodeURIComponent(searchTerm+' site:wiwo.de')+')');
     
 	return text;
 }

@@ -19,13 +19,35 @@ logging.conversation = function(payload){
 			
 		}
 	});
-}
+};
+
+
+logging.vhb = function(payload){
+	console.log('START LOGGING');
+	var options = {
+		method: 'GET',
+		uri: 'http://dienste.vhb.de/chatbot/admin/post/',
+		qs: payload
+	};
+
+	console.log('LOGGING.VHB: Payload> ',payload)
+	request(options, function (error, response, body) {
+		if (!error && response.statusCode == 200) {
+			console.log('LOGGING.VHB: Reply> ',body) // Print the shortened url.
+		} else {
+			console.warn('LOGGIN.VHB: Error> ', error, response.statusCode);
+			
+		}
+	});
+};
 
 
 
 if (require.main === module) {
   //console.log('Texting', process.env.proxysrv);
   
+  
+
   logging.conversation({
 	"message_text": "Test" + new Date().getTime(),
 	"message_sourcetext": "Wie geht's?",

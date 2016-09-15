@@ -25,8 +25,9 @@ var FEEDS = {
     hot: CONST.RSS + 'test_meistgeklickt',
     unternehmen: CONST.RSS + 'unternehmen',
     finanzen: CONST.RSS + 'finanzen',
-    politik: CONST.RSS + 'politk',
+    politik: CONST.RSS + 'politik',
     erfolg: CONST.RSS + 'erfolg',
+    job: CONST.RSS + 'job',
     technologie: CONST.RSS + 'technologie'//,
     //green:'http://green.wiwo.de/feed/'
   }

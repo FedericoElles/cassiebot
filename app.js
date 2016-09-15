@@ -3,6 +3,8 @@ var builder = require('botbuilder');
 var Botkit = require('botkit');
 var sprintf = require("sprintf-js").sprintf
 var url = require('url');
+var cheerio = require('cheerio');
+var request = require('request');
 
 var googleTranslate = require('google-translate')(process.env.translateKey || '');
 
@@ -16,9 +18,20 @@ var logging = require('./logging');
 var helper = require('./helper');
 var userdata = require('./userdata');
 var luisApi = require('./luis');
+var apiAi = require('./apiai');
+var natural = require('./natural');
 
 // Create bot and add dialogs
 var DEBUG = process.env.debug === 'true' || false;
+
+var LUISAPPS = {
+    DISPATCHER: 'c7155efb-dd09-46bc-95b8-73f8671d5528',
+    GENERAL: '3a505278-4c2c-4d3b-bdb5-43c4de6cc83e'
+}
+
+var CONFIG = {
+    expertMinScore: 50
+};
 
 var NOTEXTBOT = true;
 
@@ -49,26 +62,50 @@ function sende(session, text, intent, force){
          //TODO choose text from text array randomly
          var reply = {};
          reply.text = text[Math.floor(Math.random()*text.length)];
+         reply.intent = intent;
+         reply.expert = session._meta.expert;
          
          if (session.tempAttachments){
              reply.attachments = session.tempAttachments;
          }
          
-         console.log('SENDE>', reply);
+         //console.log('SENDE>', reply);
          session.send(reply);
      }
     
   logging.conversation({
 	"message_text": session.message.text,
-	"message_sourcetext": session.message.sourceText,
+	"message_sourcetext": session.message.sourceText || session.message.text,
 	"message_language": session.message.language,
-	"message_sourcelanguage": session.message.sourceLanguage,
+	"message_sourcelanguage": session.message.sourceLanguage || session.message.language,
 	"reply_intent": intent,  
 	"reply_language": msg ? msg.language : 'de',
 	"reply_text": msg ? msg.text : reply.text,
 	"channel": session.message.from ? session.message.from.channelId : 'No message.from',
 	"debug": "sendFunction"
   });
+
+  //only for ext interface
+  if (session.flagFake){
+    //check if answer was provided by bot
+    var botAnswer = true;
+    var notAnswered = ['onDefault','bot.apiai.expert.noanswer','bot.static.forwarded','bot.static.confused','bot.static.search__nosearchterm','bot.static.stock__nosearchterm'];  
+    if (notAnswered.indexOf(intent) > -1){
+        botAnswer = false;
+    }
+    if (session._meta.sent !== true){
+        logging.vhb({
+            website:'wiwo',
+            question:session.message.sourceText || session.message.text,
+            botAnswer:reply.text,
+            flagAnsweredByBot:(botAnswer?'1':'0'),
+            articleID: session._meta.articleId || '0',
+            botQuestionCategory:session._meta.botQuestionCategory,
+            botSession: session._meta.session || '0'
+        });
+        session._meta.sent = true;
+    }
+  }
 }
 
 function attach(session, data){
@@ -76,6 +113,23 @@ function attach(session, data){
     session.tempAttachments.push(data);
 }
 
+function sendeDefault(session, args){
+    sende(session, "Es tut mir leid. Dies habe ich nicht verstanden.", 'onDefault');
+    
+    //DEBUG Version
+    // sende(session,
+    //     sprintf("Es tut mir leid. Dies habe ich nicht verstanden.  \nÜbersetzung: '%s'.  \nBeste Vermutung: %s (%s%%)",
+    //        session.message.text,
+    //        helper.getIntent(args),
+    //        helper.getConfidence(args)
+    //     ),
+    //     'onDefault');   
+}
+
+
+/**
+ * START MAIN PROCESS
+ */
 
 if (NOTEXTBOT && (process.env.PORT || process.env.port || DEBUG)){
     var bot = new builder.BotConnectorBot({ appId: process.env.appId, appSecret: process.env.appSecret });
@@ -87,25 +141,35 @@ if (NOTEXTBOT && (process.env.PORT || process.env.port || DEBUG)){
     var bot = new builder.TextBot();
 }
 
-var dialog = new builder.LuisDialog('https://api.projectoxford.ai/luis/v1/application?id=3a505278-4c2c-4d3b-bdb5-43c4de6cc83e&subscription-key=' + process.env.luisKey);
 
 /**
  * Extend default dialog to be reusable
  */
-var xdialog = {
-    _data: {},
-    on: function(name, callback){
-        dialog.on(name, callback);
+var XDialog = function(pDialog){
+    this._data = {};
+    this.on = function(name, callback){
+        pDialog.on(name, callback);
         xdialog._data[name] = callback;
-    },
-    trigger: function(name, session, args){
+    };
+    this.trigger = function(name, session, args){
         if (typeof xdialog._data[name] === 'function'){
             xdialog._data[name](session, args);
         } else {
             console.log('WARNING: Intent ' + name + ' not found in xdialog.');
         }
-    }
+    };
+    return this;
 }
+
+//advanced general dialog
+var dialog = new builder.LuisDialog('https://api.projectoxford.ai/luis/v1/application?id=3a505278-4c2c-4d3b-bdb5-43c4de6cc83e&subscription-key=' + process.env.luisKey);
+var xdialog = new XDialog(dialog);
+
+//central dispatcher dialog
+// var dispDialog = new builder.LuisDialog('https://api.projectoxford.ai/luis/v1/application?id=c7155efb-dd09-46bc-95b8-73f8671d5528&subscription-key=' + process.env.luisKey);
+// var xDispDialog = new XDialog(dispDialog);
+
+
 
 
 /**
@@ -195,6 +259,16 @@ texting.onReady(function(intents){
 xdialog.on('bot.search', 
     function (session, args) {
         var searchTerm = builder.EntityRecognizer.findEntity(args.entities, 'Search Term');
+    
+        if (!searchTerm){
+            var stagedSearchTerm = helper.getQuoted(session.message.sourceText || session.message.text);
+            if (stagedSearchTerm){
+                searchTerm = {
+                    entity: stagedSearchTerm
+                };
+            }
+        }   
+   
         console.log('Search Term', searchTerm);
         if (!searchTerm) {
             sende(session,
@@ -226,7 +300,7 @@ xdialog.on('bot.stock', function (session, args) {
     var searchTerm = builder.EntityRecognizer.findEntity(args.entities, 'Search Term');
     
     if (!searchTerm){
-        var stagedSearchTerm = helper.getQuoted(session.message.text);
+        var stagedSearchTerm = helper.getQuoted(session.message.sourceText || session.message.text);
         if (stagedSearchTerm){
             searchTerm = {
                 entity: stagedSearchTerm
@@ -286,7 +360,8 @@ xdialog.on('bot.ressort.recent',
             'policy': 'politik',
             'success': 'erfolg',
             'finance': 'finanzen',
-            'financial': 'finanzen'
+            'financial': 'finanzen',
+            'job': 'job'
         };
         var found = false;
         var ressortFound = '';
@@ -317,19 +392,24 @@ xdialog.on('bot.ressort.recent',
     }
 );
 
+xdialog.on('None', function (session, args) {
+    sende(session, texting.static('confused'), 'bot.static.confused', false);
+});
+
  
 dialog.onBegin(function (session, args, next) {
     sende(session, 'Hallo Welt!','onBegin');
 });  
 
 dialog.onDefault(function(session, args){
-    sende(session,
-        sprintf("Es tut mir leid. Dies habe ich nicht verstanden.  \nÜbersetzung: '%s'.  \nBeste Vermutung: %s (%s%%)",
-           session.message.text,
-           helper.getIntent(args),
-           helper.getConfidence(args)
-        ),
-        'onDefault');   
+    sendeDefault(session, args);
+    // sende(session,
+    //     sprintf("Es tut mir leid. Dies habe ich nicht verstanden.  \nÜbersetzung: '%s'.  \nBeste Vermutung: %s (%s%%)",
+    //        session.message.text,
+    //        helper.getIntent(args),
+    //        helper.getConfidence(args)
+    //     ),
+    //     'onDefault');   
 });
 
 
@@ -460,9 +540,45 @@ if (NOTEXTBOT && (process.env.PORT || process.env.port || DEBUG)){
         next();
     });
 
+
+    //Teaser API
+    server.get("/api/wiwo/meta", function (req, res) {
+        var query = url.parse(req.url,true).query;
+        res.header("Content-Type", "application/json");
+        res.charSet('utf-8');        
+        res.header('Access-Control-Allow-Origin', '*');
+        res.header('Access-Control-Allow-Methods', 'GET');
+
+        request.get('http://www.wiwo.de'+query.url, function (error, response, body) {
+            if (!error && response.statusCode == 200) {
+                var $ = cheerio.load(body);
+                var json = {
+                    url: 'http://www.wiwo.de'+query.url
+                };
+                ['type','title','description','image'].forEach(function(name){
+                    json[name] =  $('[name="og:'+name+'"]').attr('content');
+                });
+                json.author = $('[rel="author"]').first().text();
+                res.send(json);
+            } else {
+                res.send(error);
+            }
+        });
+    });
+
+
     
     //External API
     if (process.env.translateKey){
+        server.get('/feedback', function(req, res, next) {
+            //TODO: Forward to Dashboard
+            res.header("Content-Type", "application/json");
+            res.charSet('utf-8');
+            res.header('Access-Control-Allow-Origin', '*');
+            res.header('Access-Control-Allow-Methods', 'GET');             
+            res.send({success: true});
+        });
+
         server.get('/ext', function(req, res, next) {
             var query = url.parse(req.url,true).query;
             //console.log('params', query)
@@ -471,44 +587,147 @@ if (NOTEXTBOT && (process.env.PORT || process.env.port || DEBUG)){
             res.header('Access-Control-Allow-Origin', '*');
             res.header('Access-Control-Allow-Methods', 'GET');            
 
+
+            // No answer available
+            function noAnswer(){
+
+                function submit(){
+                    sende(res, 'Ich kann diese Frage leider nicht beantworten und habe sie an einen Journalisten weitergeleitet.  \n  \nDie neusten Artikel zum Thema Bewerben:', 'bot.apiai.expert.noanswer');
+                }
+
+                if (res._meta.expert === 'bewerbung'){
+                    api.readFeed('wiwo', 'erfolg').then(function(data){
+                        attach(res, {type: 'teaser', data: data});
+                        submit();
+                    });
+                } else {
+                    submit();
+                }
+            }
+
+
             if (query.msg){
                 var msg = query.msg;
 
-                googleTranslate.translate(msg, 'de','en', function(err, translation) {
-                    if (err){
-                        res.send(err);
-                    } else {
-                        console.log(translation);
-                        //res.send("Translation: " + translation.translatedText);
-                        
-                        var message = {
-                              text: translation.translatedText,
-                              sourceText: msg,
-                              language: 'en',
-                              sourceLanguage: 'de'  
-                        };
-                        
-                        res.message = message;
-                        res.userData = {};
-                        res.flagFake = true;
-                        
-                        
-                        //sende(res, translation.translatedText, '');
-                        
-                        luisApi.query(translation.translatedText).then(
-                            function(json){
-                                var args = JSON.parse(json);
-                                if (helper.getConfidence(args) > 9){
-                                    xdialog.trigger(helper.getIntent(args), res, args);    
-                                }
-                                
+                var message = {
+                        text: msg, // translation.translatedText,
+                        //sourceText: msg,
+                        language: 'de' //'en',
+                        //sourceLanguage: 'de'  
+                };
+                
+                res.message = message;
+                res.userData = {};
+                res.flagFake = true;
+                res._meta = {
+                    session: query.session,
+                    articleId: query.articleId,
+                    expert: query.expert
+                };
+                
+                luisApi.query(msg, LUISAPPS.DISPATCHER).then(
+                    function(args){
+                        if (args.winner.confidence > 9){
+                            res._meta.botQuestionCategory = args.winner.intent;
+                            switch (args.winner.intent) {
+                                case 'question.general':
+                                    //xdialog.trigger('bot.static.question_general', res, args);
+                                    //Query General Bot
+
+                                    googleTranslate.translate(msg, 'de','en', function(err, translation) {
+                                        if (err){
+                                            res.send(err);
+                                        } else {
+                                            res.message.sourceText = res.message.text;
+                                            res.message.text = translation.translatedText
+                                            res.message.sourceLanguage = 'de',
+                                            res.message.language = 'en';
+
+                                            luisApi.query(translation.translatedText, LUISAPPS.GENERAL).then(
+                                                function(args){
+                                                    if (args.winner.confidence > 9){
+                                                        xdialog.trigger(args.winner.intent, res, args);    
+                                                    } else {
+                                                        sendeDefault(res, args);
+                                                    }
+                                                }
+                                            ).catch(function(err){
+                                                res.send(err);
+                                            });
+                                        }
+                                    });
+
+                                    
+
+                                    break;
+                                case 'question.specific':
+                                    
+
+                                    if (res._meta.expert && apiAi.hasExpert(res._meta.expert)){
+                                        //an expert was forced
+
+                                        apiAi.query(msg, res._meta.expert).then(function (json) {
+
+                                            if (json.score >= CONFIG.expertMinScore){
+                                                if (json.links && json.links.length > 0){
+                                                    attach(res, {type: 'relatedArticles', data: json.links});
+                                                }
+                                                sende(res, json.reply, 'bot.apiai.expert.forced');
+                                                //DEBUG: + '  \n(Beantwortet via  ' + res._meta.expert + 'Bot - ' + json.score + '%)'
+                                            } else {
+                                                noAnswer();
+                                            }
+                                        }).fail(function (err) {
+                                            res.send(err);
+                                        });
+                                        
+                                    } else { 
+                                        //ask natural package to determine expert
+                                        var expertTopic = natural.getExpert(msg, 0.1);
+
+                                        if (expertTopic && apiAi.hasExpert(expertTopic)){
+                                            res._meta.expert = expertTopic;
+                                            apiAi.query(msg, expertTopic).then(function (json) {
+                                                if (json.score >= CONFIG.expertMinScore){
+                                                    if (json.links && json.links.length > 0){
+                                                        attach(res, {type: 'relatedArticles', data: json.links});
+                                                    }
+                                                    sende(res, json.reply, 'bot.apiai.expert');
+                                                    //DEBUG: + '  \n(Via  ' + expertTopic + 'Bot - ' + json.score + '%)'
+                                                } else {
+                                                    noAnswer();
+                                                }
+                                            }).fail(function (err) {
+                                                res.send(err);
+                                            });                                        
+    
+                                        } else {
+                                            xdialog.trigger('bot.static.forwarded', res, args);
+                                        }
+                                    }
+
+                                    break;                                            
+                                case 'feedback.negative':
+                                    xdialog.trigger('bot.static.feedback_negative', res, args);
+                                    break; 
+                                case 'feedback.positive':
+                                    xdialog.trigger('bot.static.feedback_positive', res, args);
+                                    break; 
+                                case 'spam':
+                                    xdialog.trigger('bot.static.spam', res, args);
+                                    break;                                             
+                                default:
+                                    sendeDefault(res, args);
+                                    break;
                             }
-                        )
-                        
-                        //todo Args = LUIS Object
+                        } else {
+                            sendeDefault(res, args);
+                        }
                     }
-                // =>  { translatedText: 'Hallo', originalText: 'Hello', detectedSourceLanguage: 'en' }
-                });
+                ).catch(function(err){
+                    res.send(err);
+                })
+
 
 
                 
